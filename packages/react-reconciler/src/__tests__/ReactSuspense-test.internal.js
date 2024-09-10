@@ -136,6 +136,10 @@ describe('ReactSuspense', () => {
       // A suspends
       'Suspend! [A]',
       'Loading...',
+
+      ...(gate('enableSiblingPrerendering')
+        ? ['Foo', 'Bar', 'Suspend! [A]', 'B', 'Loading...']
+        : []),
     ]);
     expect(container.textContent).toEqual('');
 
@@ -275,7 +279,15 @@ describe('ReactSuspense', () => {
     expect(container.textContent).toEqual('Loading...');
 
     await resolveText('A');
-    await waitForAll(['A', 'Suspend! [B]', 'Loading more...']);
+    await waitForAll([
+      'A',
+      'Suspend! [B]',
+      'Loading more...',
+
+      ...(gate('enableSiblingPrerendering')
+        ? ['A', 'Suspend! [B]', 'Loading more...']
+        : []),
+    ]);
 
     // By this point, we have enough info to show "A" and "Loading more..."
     // However, we've just shown the outer fallback. So we'll delay
@@ -327,7 +339,14 @@ describe('ReactSuspense', () => {
     // B starts loading. Parent boundary is in throttle.
     // Still shows parent loading under throttle
     jest.advanceTimersByTime(10);
-    await waitForAll(['Suspend! [B]', 'Loading more...']);
+    await waitForAll([
+      'Suspend! [B]',
+      'Loading more...',
+
+      ...(gate('enableSiblingPrerendering')
+        ? ['A', 'Suspend! [B]', 'Loading more...']
+        : []),
+    ]);
     expect(container.textContent).toEqual('Loading...');
 
     // !! B could have finished before the throttle, but we show a fallback.
@@ -361,7 +380,15 @@ describe('ReactSuspense', () => {
     expect(container.textContent).toEqual('Loading...');
 
     await resolveText('A');
-    await waitForAll(['A', 'Suspend! [B]', 'Loading more...']);
+    await waitForAll([
+      'A',
+      'Suspend! [B]',
+      'Loading more...',
+
+      ...(gate('enableSiblingPrerendering')
+        ? ['A', 'Suspend! [B]', 'Loading more...']
+        : []),
+    ]);
 
     // By this point, we have enough info to show "A" and "Loading more..."
     // However, we've just shown the outer fallback. So we'll delay
@@ -377,74 +404,6 @@ describe('ReactSuspense', () => {
     assertLog(['B']);
     expect(container.textContent).toEqual('AB');
   });
-
-  // @gate !disableLegacyMode && forceConcurrentByDefaultForTesting
-  it(
-    'interrupts current render when something suspends with a ' +
-      "delay and we've already skipped over a lower priority update in " +
-      'a parent',
-    async () => {
-      const root = ReactDOMClient.createRoot(container);
-
-      function interrupt() {
-        // React has a heuristic to batch all updates that occur within the same
-        // event. This is a trick to circumvent that heuristic.
-        ReactDOM.render('whatever', document.createElement('div'));
-      }
-
-      function App({shouldSuspend, step}) {
-        return (
-          <>
-            <Text text={`A${step}`} />
-            <Suspense fallback={<Text text="Loading..." />}>
-              {shouldSuspend ? <AsyncText text="Async" /> : null}
-            </Suspense>
-            <Text text={`B${step}`} />
-            <Text text={`C${step}`} />
-          </>
-        );
-      }
-
-      root.render(<App shouldSuspend={false} step={0} />);
-      await waitForAll(['A0', 'B0', 'C0']);
-      expect(container.textContent).toEqual('A0B0C0');
-
-      // This update will suspend.
-      root.render(<App shouldSuspend={true} step={1} />);
-
-      // Do a bit of work
-      await waitFor(['A1']);
-
-      // Schedule another update. This will have lower priority because it's
-      // a transition.
-      React.startTransition(() => {
-        root.render(<App shouldSuspend={false} step={2} />);
-      });
-
-      // Interrupt to trigger a restart.
-      interrupt();
-
-      await waitFor([
-        // Should have restarted the first update, because of the interruption
-        'A1',
-        'Suspend! [Async]',
-        'Loading...',
-        'B1',
-      ]);
-
-      // Should not have committed loading state
-      expect(container.textContent).toEqual('A0B0C0');
-
-      // After suspending, should abort the first update and switch to the
-      // second update. So, C1 should not appear in the log.
-      // TODO: This should work even if React does not yield to the main
-      // thread. Should use same mechanism as selective hydration to interrupt
-      // the render before the end of the current slice of work.
-      await waitForAll(['A2', 'B2', 'C2']);
-
-      expect(container.textContent).toEqual('A2B2C2');
-    },
-  );
 
   // @gate !disableLegacyMode
   it('mounts a lazy class component in non-concurrent mode (legacy)', async () => {
@@ -723,7 +682,14 @@ describe('ReactSuspense', () => {
 
     assertLog(['Suspend! [Child 1]', 'Loading...']);
     await resolveText('Child 1');
-    await waitForAll(['Child 1', 'Suspend! [Child 2]']);
+    await waitForAll([
+      'Child 1',
+      'Suspend! [Child 2]',
+
+      ...(gate('enableSiblingPrerendering')
+        ? ['Child 1', 'Suspend! [Child 2]']
+        : []),
+    ]);
 
     jest.advanceTimersByTime(6000);
 

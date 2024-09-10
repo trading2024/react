@@ -198,7 +198,11 @@ describe('ReactLazy', () => {
 
     await resolveFakeImport(Foo);
 
-    await waitForAll(['Foo']);
+    await waitForAll([
+      'Foo',
+
+      ...(gate('enableSiblingPrerendering') ? ['Foo'] : []),
+    ]);
     expect(root).not.toMatchRenderedOutput('FooBar');
 
     await act(() => resolveFakeImport(Bar));
@@ -213,14 +217,18 @@ describe('ReactLazy', () => {
       unstable_isConcurrent: true,
     });
 
+    function App() {
+      return (
+        <Suspense fallback={<Text text="Loading..." />}>
+          <LazyText text="Hi" />
+        </Suspense>
+      );
+    }
+
     let error;
     try {
       await act(() => {
-        root.update(
-          <Suspense fallback={<Text text="Loading..." />}>
-            <LazyText text="Hi" />
-          </Suspense>,
-        );
+        root.update(<App />);
       });
     } catch (e) {
       error = e;
@@ -231,6 +239,13 @@ describe('ReactLazy', () => {
     assertConsoleErrorDev([
       'Expected the result of a dynamic import() call',
       'Expected the result of a dynamic import() call',
+
+      ...(gate('enableSiblingPrerendering')
+        ? [
+            'Expected the result of a dynamic import() call',
+            'Expected the result of a dynamic import() call',
+          ]
+        : []),
     ]);
     expect(root).not.toMatchRenderedOutput('Hi');
   });
@@ -703,7 +718,7 @@ describe('ReactLazy', () => {
       await act(() => resolveFakeImport(T));
       assertLog(['Hi Bye']);
     }).toErrorDev(
-      'Warning: T: Support for defaultProps ' +
+      'T: Support for defaultProps ' +
         'will be removed from function components in a future major ' +
         'release. Use JavaScript default parameters instead.',
     );
@@ -749,6 +764,32 @@ describe('ReactLazy', () => {
     );
     await waitForThrow(
       'Element type is invalid. Received a promise that resolves to: 42. ' +
+        'Lazy element type must resolve to a class or function.',
+    );
+  });
+
+  it('throws with a useful error when wrapping fragment with lazy()', async () => {
+    const BadLazy = lazy(() => fakeImport(React.Fragment));
+
+    const root = ReactTestRenderer.create(
+      <Suspense fallback={<Text text="Loading..." />}>
+        <BadLazy />
+      </Suspense>,
+      {
+        unstable_isConcurrent: true,
+      },
+    );
+
+    await waitForAll(['Loading...']);
+
+    await resolveFakeImport(React.Fragment);
+    root.update(
+      <Suspense fallback={<Text text="Loading..." />}>
+        <BadLazy />
+      </Suspense>,
+    );
+    await waitForThrow(
+      'Element type is invalid. Received a promise that resolves to: Fragment. ' +
         'Lazy element type must resolve to a class or function.',
     );
   });
@@ -811,10 +852,10 @@ describe('ReactLazy', () => {
             'Add: Support for defaultProps will be removed from function components in a future major release. Use JavaScript default parameters instead.',
           ]
         : shouldWarnAboutMemoDefaultProps
-        ? [
-            'Add: Support for defaultProps will be removed from memo components in a future major release. Use JavaScript default parameters instead.',
-          ]
-        : [],
+          ? [
+              'Add: Support for defaultProps will be removed from memo components in a future major release. Use JavaScript default parameters instead.',
+            ]
+          : [],
     );
     expect(root).toMatchRenderedOutput('22');
 
@@ -1042,7 +1083,7 @@ describe('ReactLazy', () => {
     expect(ref.current).toBe(null);
 
     await act(() => resolveFakeImport(Foo));
-    assertLog(['Foo']);
+    assertLog(['Foo', ...(gate('enableSiblingPrerendering') ? ['Foo'] : [])]);
 
     await act(() => resolveFakeImport(ForwardRefBar));
     assertLog(['Foo', 'forwardRef', 'Bar']);
@@ -1358,7 +1399,12 @@ describe('ReactLazy', () => {
     expect(root).not.toMatchRenderedOutput('AB');
 
     await act(() => resolveFakeImport(ChildA));
-    assertLog(['A', 'Init B']);
+    assertLog([
+      'A',
+      'Init B',
+
+      ...(gate('enableSiblingPrerendering') ? ['A'] : []),
+    ]);
 
     await act(() => resolveFakeImport(ChildB));
     assertLog(['A', 'B', 'Did mount: A', 'Did mount: B']);
@@ -1442,10 +1488,20 @@ describe('ReactLazy', () => {
     React.startTransition(() => {
       root.update(<Parent swap={true} />);
     });
-    await waitForAll(['Init B2', 'Loading...']);
+    await waitForAll([
+      'Init B2',
+      'Loading...',
+
+      ...(gate('enableSiblingPrerendering') ? ['Loading...'] : []),
+    ]);
     await act(() => resolveFakeImport(ChildB2));
     // We need to flush to trigger the second one to load.
-    assertLog(['Init A2', 'Loading...']);
+    assertLog([
+      'Init A2',
+      'Loading...',
+
+      ...(gate('enableSiblingPrerendering') ? ['Loading...'] : []),
+    ]);
     await act(() => resolveFakeImport(ChildA2));
     assertLog(['b', 'a', 'Did update: b', 'Did update: a']);
     expect(root).toMatchRenderedOutput('ba');

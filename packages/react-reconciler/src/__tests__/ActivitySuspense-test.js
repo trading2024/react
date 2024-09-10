@@ -99,7 +99,7 @@ describe('Activity Suspense', () => {
   }
 
   // @gate enableActivity
-  test('basic example of suspending inside hidden tree', async () => {
+  it('basic example of suspending inside hidden tree', async () => {
     const root = ReactNoop.createRoot();
 
     function App() {
@@ -215,7 +215,15 @@ describe('Activity Suspense', () => {
         );
       });
     });
-    assertLog(['Open', 'Suspend! [Async]', 'Loading...']);
+    assertLog([
+      'Open',
+      'Suspend! [Async]',
+      'Loading...',
+
+      ...(gate('enableSiblingPrerendering')
+        ? ['Open', 'Suspend! [Async]', 'Loading...']
+        : []),
+    ]);
     // It should suspend with delay to prevent the already-visible Suspense
     // boundary from switching to a fallback
     expect(root).toMatchRenderedOutput(<span>Closed</span>);
@@ -276,7 +284,15 @@ describe('Activity Suspense', () => {
         );
       });
     });
-    assertLog(['Open', 'Suspend! [Async]', 'Loading...']);
+    assertLog([
+      'Open',
+      'Suspend! [Async]',
+      'Loading...',
+
+      ...(gate('enableSiblingPrerendering')
+        ? ['Open', 'Suspend! [Async]', 'Loading...']
+        : []),
+    ]);
     // It should suspend with delay to prevent the already-visible Suspense
     // boundary from switching to a fallback
     expect(root).toMatchRenderedOutput(
