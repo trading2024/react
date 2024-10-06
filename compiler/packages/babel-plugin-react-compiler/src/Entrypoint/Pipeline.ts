@@ -41,6 +41,7 @@ import {
   constantPropagation,
   deadCodeElimination,
   pruneMaybeThrows,
+  inlineJsxTransform,
 } from '../Optimization';
 import {instructionReordering} from '../Optimization/InstructionReordering';
 import {
@@ -101,6 +102,7 @@ import {propagatePhiTypes} from '../TypeInference/PropagatePhiTypes';
 import {lowerContextAccess} from '../Optimization/LowerContextAccess';
 import {validateNoSetStateInPassiveEffects} from '../Validation/ValidateNoSetStateInPassiveEffects';
 import {validateNoJSXInTryStatement} from '../Validation/ValidateNoJSXInTryStatement';
+import {propagateScopeDependenciesHIR} from '../HIR/PropagateScopeDependenciesHIR';
 
 export type CompilerPipelineValue =
   | {kind: 'ast'; name: string; value: CodegenFunction}
@@ -341,6 +343,23 @@ function* runWithEnvironment(
   });
   assertTerminalSuccessorsExist(hir);
   assertTerminalPredsExist(hir);
+  if (env.config.enablePropagateDepsInHIR) {
+    propagateScopeDependenciesHIR(hir);
+    yield log({
+      kind: 'hir',
+      name: 'PropagateScopeDependenciesHIR',
+      value: hir,
+    });
+  }
+
+  if (env.config.inlineJsxTransform) {
+    inlineJsxTransform(hir, env.config.inlineJsxTransform);
+    yield log({
+      kind: 'hir',
+      name: 'inlineJsxTransform',
+      value: hir,
+    });
+  }
 
   const reactiveFunction = buildReactiveFunction(hir);
   yield log({
@@ -359,12 +378,14 @@ function* runWithEnvironment(
   });
   assertScopeInstructionsWithinScopes(reactiveFunction);
 
-  propagateScopeDependencies(reactiveFunction);
-  yield log({
-    kind: 'reactive',
-    name: 'PropagateScopeDependencies',
-    value: reactiveFunction,
-  });
+  if (!env.config.enablePropagateDepsInHIR) {
+    propagateScopeDependencies(reactiveFunction);
+    yield log({
+      kind: 'reactive',
+      name: 'PropagateScopeDependencies',
+      value: reactiveFunction,
+    });
+  }
 
   pruneNonEscapingScopes(reactiveFunction);
   yield log({
@@ -542,4 +563,15 @@ export function log(value: CompilerPipelineValue): CompilerPipelineValue {
     }
   }
   return value;
+}
+
+export function* runPlayground(
+  func: NodePath<
+    t.FunctionDeclaration | t.ArrowFunctionExpression | t.FunctionExpression
+  >,
+  config: EnvironmentConfig,
+  fnType: ReactFunctionType,
+): Generator<CompilerPipelineValue, CodegenFunction> {
+  const ast = yield* run(func, config, fnType, '_c', null, null, null);
+  return ast;
 }

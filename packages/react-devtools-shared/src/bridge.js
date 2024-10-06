@@ -15,7 +15,7 @@ import type {
   OwnersList,
   ProfilingDataBackend,
   RendererID,
-  ConsolePatchSettings,
+  DevToolsHookSettings,
 } from 'react-devtools-shared/src/backend/types';
 import type {StyleAndLayout as StyleAndLayoutPayload} from 'react-devtools-shared/src/backend/NativeStyleEditor/types';
 
@@ -170,22 +170,18 @@ type NativeStyleEditor_SetValueParams = {
 };
 
 type SavedPreferencesParams = {
-  appendComponentStack: boolean,
-  breakOnConsoleErrors: boolean,
   componentFilters: Array<ComponentFilter>,
-  showInlineWarningsAndErrors: boolean,
-  hideConsoleLogsInStrictMode: boolean,
 };
 
 export type BackendEvents = {
+  backendInitialized: [],
   backendVersion: [string],
   bridgeProtocol: [BridgeProtocol],
   extensionBackendInitialized: [],
   fastRefreshScheduled: [],
   getSavedPreferences: [],
   inspectedElement: [InspectedElementPayload],
-  isBackendStorageAPISupported: [boolean],
-  isSynchronousXHRSupported: [boolean],
+  isReloadAndProfileSupportedByBackend: [boolean],
   operations: [Array<number>],
   ownersList: [OwnersList],
   overrideComponentFilters: [Array<ComponentFilter>],
@@ -199,13 +195,15 @@ export type BackendEvents = {
   stopInspectingHost: [boolean],
   syncSelectionFromBuiltinElementsPanel: [],
   syncSelectionToBuiltinElementsPanel: [],
-  unsupportedRendererVersion: [RendererID],
+  unsupportedRendererVersion: [],
 
   // React Native style editor plug-in.
   isNativeStyleEditorSupported: [
     {isSupported: boolean, validAttributes: ?$ReadOnlyArray<string>},
   ],
   NativeStyleEditor_styleAndLayout: [StyleAndLayoutPayload],
+
+  hookSettings: [$ReadOnly<DevToolsHookSettings>],
 };
 
 type FrontendEvents = {
@@ -217,6 +215,7 @@ type FrontendEvents = {
   deletePath: [DeletePath],
   getBackendVersion: [],
   getBridgeProtocol: [],
+  getIfHasUnsupportedRendererVersion: [],
   getOwnersList: [ElementAndRendererID],
   getProfilingData: [{rendererID: RendererID}],
   getProfilingStatus: [],
@@ -239,7 +238,7 @@ type FrontendEvents = {
   storeAsGlobal: [StoreAsGlobalParams],
   updateComponentFilters: [Array<ComponentFilter>],
   getEnvironmentNames: [],
-  updateConsolePatchSettings: [ConsolePatchSettings],
+  updateHookSettings: [$ReadOnly<DevToolsHookSettings>],
   viewAttributeSource: [ViewAttributeSourceParams],
   viewElementSource: [ElementAndRendererID],
 
@@ -265,6 +264,8 @@ type FrontendEvents = {
 
   resumeElementPolling: [],
   pauseElementPolling: [],
+
+  getHookSettings: [],
 };
 
 class Bridge<

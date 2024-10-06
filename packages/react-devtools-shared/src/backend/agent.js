@@ -8,23 +8,12 @@
  */
 
 import EventEmitter from '../events';
-import {
-  SESSION_STORAGE_LAST_SELECTION_KEY,
-  SESSION_STORAGE_RELOAD_AND_PROFILE_KEY,
-  SESSION_STORAGE_RECORD_CHANGE_DESCRIPTIONS_KEY,
-  __DEBUG__,
-} from '../constants';
-import {
-  sessionStorageGetItem,
-  sessionStorageRemoveItem,
-  sessionStorageSetItem,
-} from 'react-devtools-shared/src/storage';
+import {SESSION_STORAGE_LAST_SELECTION_KEY, __DEBUG__} from '../constants';
 import setupHighlighter from './views/Highlighter';
 import {
   initialize as setupTraceUpdates,
   toggleEnabled as setTraceUpdatesEnabled,
 } from './views/TraceUpdates';
-import {patch as patchConsole} from './console';
 import {currentBridgeProtocol} from 'react-devtools-shared/src/bridge';
 
 import type {BackendBridge} from 'react-devtools-shared/src/bridge';
@@ -36,13 +25,17 @@ import type {
   PathMatch,
   RendererID,
   RendererInterface,
-  ConsolePatchSettings,
+  DevToolsHookSettings,
+  ReloadAndProfileConfigPersistence,
 } from './types';
-import type {
-  ComponentFilter,
-  BrowserTheme,
-} from 'react-devtools-shared/src/frontend/types';
-import {isSynchronousXHRSupported, isReactNativeEnvironment} from './utils';
+import type {ComponentFilter} from 'react-devtools-shared/src/frontend/types';
+import {isReactNativeEnvironment} from './utils';
+import {defaultReloadAndProfileConfigPersistence} from '../utils';
+import {
+  sessionStorageGetItem,
+  sessionStorageRemoveItem,
+  sessionStorageSetItem,
+} from '../storage';
 
 const debug = (methodName: string, ...args: Array<string>) => {
   if (__DEBUG__) {
@@ -152,6 +145,9 @@ export default class Agent extends EventEmitter<{
   traceUpdates: [Set<HostInstance>],
   drawTraceUpdates: [Array<HostInstance>],
   disableTraceUpdates: [],
+  getIfHasUnsupportedRendererVersion: [],
+  updateHookSettings: [$ReadOnly<DevToolsHookSettings>],
+  getHookSettings: [],
 }> {
   _bridge: BackendBridge;
   _isProfiling: boolean = false;
@@ -160,21 +156,27 @@ export default class Agent extends EventEmitter<{
   _persistedSelection: PersistedSelection | null = null;
   _persistedSelectionMatch: PathMatch | null = null;
   _traceUpdatesEnabled: boolean = false;
+  _reloadAndProfileConfigPersistence: ReloadAndProfileConfigPersistence;
 
-  constructor(bridge: BackendBridge) {
+  constructor(
+    bridge: BackendBridge,
+    reloadAndProfileConfigPersistence?: ReloadAndProfileConfigPersistence = defaultReloadAndProfileConfigPersistence,
+  ) {
     super();
 
-    if (
-      sessionStorageGetItem(SESSION_STORAGE_RELOAD_AND_PROFILE_KEY) === 'true'
-    ) {
+    this._reloadAndProfileConfigPersistence = reloadAndProfileConfigPersistence;
+    const {getReloadAndProfileConfig, setReloadAndProfileConfig} =
+      reloadAndProfileConfigPersistence;
+    const reloadAndProfileConfig = getReloadAndProfileConfig();
+    if (reloadAndProfileConfig.shouldReloadAndProfile) {
       this._recordChangeDescriptions =
-        sessionStorageGetItem(
-          SESSION_STORAGE_RECORD_CHANGE_DESCRIPTIONS_KEY,
-        ) === 'true';
+        reloadAndProfileConfig.recordChangeDescriptions;
       this._isProfiling = true;
 
-      sessionStorageRemoveItem(SESSION_STORAGE_RECORD_CHANGE_DESCRIPTIONS_KEY);
-      sessionStorageRemoveItem(SESSION_STORAGE_RELOAD_AND_PROFILE_KEY);
+      setReloadAndProfileConfig({
+        shouldReloadAndProfile: false,
+        recordChangeDescriptions: false,
+      });
     }
 
     const persistedSelectionString = sessionStorageGetItem(
@@ -215,12 +217,16 @@ export default class Agent extends EventEmitter<{
       this.syncSelectionFromBuiltinElementsPanel,
     );
     bridge.addListener('shutdown', this.shutdown);
-    bridge.addListener(
-      'updateConsolePatchSettings',
-      this.updateConsolePatchSettings,
-    );
+
+    bridge.addListener('updateHookSettings', this.updateHookSettings);
+    bridge.addListener('getHookSettings', this.getHookSettings);
+
     bridge.addListener('updateComponentFilters', this.updateComponentFilters);
     bridge.addListener('getEnvironmentNames', this.getEnvironmentNames);
+    bridge.addListener(
+      'getIfHasUnsupportedRendererVersion',
+      this.getIfHasUnsupportedRendererVersion,
+    );
 
     // Temporarily support older standalone front-ends sending commands to newer embedded backends.
     // We do this because React Native embeds the React DevTools backend,
@@ -230,30 +236,15 @@ export default class Agent extends EventEmitter<{
     bridge.addListener('overrideProps', this.overrideProps);
     bridge.addListener('overrideState', this.overrideState);
 
+    setupHighlighter(bridge, this);
+    setupTraceUpdates(this);
+
+    // By this time, Store should already be initialized and intercept events
+    bridge.send('backendInitialized');
+
     if (this._isProfiling) {
       bridge.send('profilingStatus', true);
     }
-
-    // Send the Bridge protocol and backend versions, after initialization, in case the frontend has already requested it.
-    // The Store may be instantiated beore the agent.
-    const version = process.env.DEVTOOLS_VERSION;
-    if (version) {
-      this._bridge.send('backendVersion', version);
-    }
-    this._bridge.send('bridgeProtocol', currentBridgeProtocol);
-
-    // Notify the frontend if the backend supports the Storage API (e.g. localStorage).
-    // If not, features like reload-and-profile will not work correctly and must be disabled.
-    let isBackendStorageAPISupported = false;
-    try {
-      localStorage.getItem('test');
-      isBackendStorageAPISupported = true;
-    } catch (error) {}
-    bridge.send('isBackendStorageAPISupported', isBackendStorageAPISupported);
-    bridge.send('isSynchronousXHRSupported', isSynchronousXHRSupported());
-
-    setupHighlighter(bridge, this);
-    setupTraceUpdates(this);
   }
 
   get rendererInterfaces(): {[key: RendererID]: RendererInterface, ...} {
@@ -677,13 +668,16 @@ export default class Agent extends EventEmitter<{
     }
   };
 
+  onReloadAndProfileSupportedByHost: () => void = () => {
+    this._bridge.send('isReloadAndProfileSupportedByBackend', true);
+  };
+
   reloadAndProfile: (recordChangeDescriptions: boolean) => void =
     recordChangeDescriptions => {
-      sessionStorageSetItem(SESSION_STORAGE_RELOAD_AND_PROFILE_KEY, 'true');
-      sessionStorageSetItem(
-        SESSION_STORAGE_RECORD_CHANGE_DESCRIPTIONS_KEY,
-        recordChangeDescriptions ? 'true' : 'false',
-      );
+      this._reloadAndProfileConfigPersistence.setReloadAndProfileConfig({
+        shouldReloadAndProfile: true,
+        recordChangeDescriptions,
+      });
 
       // This code path should only be hit if the shell has explicitly told the Store that it supports profiling.
       // In that case, the shell must also listen for this specific message to know when it needs to reload the app.
@@ -714,7 +708,7 @@ export default class Agent extends EventEmitter<{
     }
   }
 
-  setRendererInterface(
+  registerRendererInterface(
     rendererID: RendererID,
     rendererInterface: RendererInterface,
   ) {
@@ -805,31 +799,20 @@ export default class Agent extends EventEmitter<{
     }
   };
 
-  updateConsolePatchSettings: ({
-    appendComponentStack: boolean,
-    breakOnConsoleErrors: boolean,
-    browserTheme: BrowserTheme,
-    hideConsoleLogsInStrictMode: boolean,
-    showInlineWarningsAndErrors: boolean,
-  }) => void = ({
-    appendComponentStack,
-    breakOnConsoleErrors,
-    showInlineWarningsAndErrors,
-    hideConsoleLogsInStrictMode,
-    browserTheme,
-  }: ConsolePatchSettings) => {
-    // If the frontend preferences have changed,
-    // or in the case of React Native- if the backend is just finding out the preferences-
-    // then reinstall the console overrides.
-    // It's safe to call `patchConsole` multiple times.
-    patchConsole({
-      appendComponentStack,
-      breakOnConsoleErrors,
-      showInlineWarningsAndErrors,
-      hideConsoleLogsInStrictMode,
-      browserTheme,
-    });
+  updateHookSettings: (settings: $ReadOnly<DevToolsHookSettings>) => void =
+    settings => {
+      // Propagate the settings, so Backend can subscribe to it and modify hook
+      this.emit('updateHookSettings', settings);
+    };
+
+  getHookSettings: () => void = () => {
+    this.emit('getHookSettings');
   };
+
+  onHookSettings: (settings: $ReadOnly<DevToolsHookSettings>) => void =
+    settings => {
+      this._bridge.send('hookSettings', settings);
+    };
 
   updateComponentFilters: (componentFilters: Array<ComponentFilter>) => void =
     componentFilters => {
@@ -945,8 +928,12 @@ export default class Agent extends EventEmitter<{
     }
   };
 
-  onUnsupportedRenderer(rendererID: number) {
-    this._bridge.send('unsupportedRendererVersion', rendererID);
+  getIfHasUnsupportedRendererVersion: () => void = () => {
+    this.emit('getIfHasUnsupportedRendererVersion');
+  };
+
+  onUnsupportedRenderer() {
+    this._bridge.send('unsupportedRendererVersion');
   }
 
   _persistSelectionTimerScheduled: boolean = false;

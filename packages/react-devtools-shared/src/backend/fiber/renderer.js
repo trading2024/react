@@ -42,7 +42,6 @@ import {
   utfEncodeString,
   filterOutLocationComponentFilters,
 } from 'react-devtools-shared/src/utils';
-import {sessionStorageGetItem} from 'react-devtools-shared/src/storage';
 import {
   formatConsoleArgumentsToSingleString,
   gt,
@@ -61,8 +60,6 @@ import {
   __DEBUG__,
   PROFILING_FLAG_BASIC_SUPPORT,
   PROFILING_FLAG_TIMELINE_SUPPORT,
-  SESSION_STORAGE_RELOAD_AND_PROFILE_KEY,
-  SESSION_STORAGE_RECORD_CHANGE_DESCRIPTIONS_KEY,
   TREE_OPERATION_ADD,
   TREE_OPERATION_REMOVE,
   TREE_OPERATION_REORDER_CHILDREN,
@@ -71,12 +68,6 @@ import {
   TREE_OPERATION_UPDATE_TREE_BASE_DURATION,
 } from '../../constants';
 import {inspectHooksOfFiber} from 'react-debug-tools';
-import {
-  patchConsoleUsingWindowValues,
-  registerRenderer as registerRendererWithConsole,
-  patchForStrictMode as patchConsoleForStrictMode,
-  unpatchForStrictMode as unpatchConsoleForStrictMode,
-} from '../console';
 import {
   CONCURRENT_MODE_NUMBER,
   CONCURRENT_MODE_SYMBOL_STRING,
@@ -112,6 +103,7 @@ import {
   supportsOwnerStacks,
   supportsConsoleTasks,
 } from './DevToolsFiberComponentStack';
+import type {ReloadAndProfileConfig} from '../types';
 
 // $FlowFixMe[method-unbinding]
 const toString = Object.prototype.toString;
@@ -769,16 +761,30 @@ const hostResourceToDevToolsInstanceMap: Map<
   Set<DevToolsInstance>,
 > = new Map();
 
+// Ideally, this should be injected from Reconciler config
 function getPublicInstance(instance: HostInstance): HostInstance {
   // Typically the PublicInstance and HostInstance is the same thing but not in Fabric.
   // So we need to detect this and use that as the public instance.
-  return typeof instance === 'object' &&
-    instance !== null &&
-    typeof instance.canonical === 'object'
-    ? (instance.canonical: any)
-    : typeof instance._nativeTag === 'number'
-      ? instance._nativeTag
-      : instance;
+
+  // React Native. Modern. Fabric.
+  if (typeof instance === 'object' && instance !== null) {
+    if (typeof instance.canonical === 'object' && instance.canonical !== null) {
+      if (
+        typeof instance.canonical.publicInstance === 'object' &&
+        instance.canonical.publicInstance !== null
+      ) {
+        return instance.canonical.publicInstance;
+      }
+    }
+
+    // React Native. Legacy. Paper.
+    if (typeof instance._nativeTag === 'number') {
+      return instance._nativeTag;
+    }
+  }
+
+  // React Web. Usually a DOM element.
+  return instance;
 }
 
 function aquireHostInstance(
@@ -857,6 +863,7 @@ export function attach(
   rendererID: number,
   renderer: ReactRenderer,
   global: Object,
+  reloadAndProfileConfig: ReloadAndProfileConfig,
 ): RendererInterface {
   // Newer versions of the reconciler package also specific reconciler version.
   // If that version number is present, use it.
@@ -1035,6 +1042,10 @@ export function attach(
       if (devtoolsInstance.kind === FIBER_INSTANCE) {
         const fiber = devtoolsInstance.data;
         componentLogsEntry = fiberToComponentLogsMap.get(fiber);
+
+        if (componentLogsEntry === undefined && fiber.alternate !== null) {
+          componentLogsEntry = fiberToComponentLogsMap.get(fiber.alternate);
+        }
       } else {
         const componentInfo = devtoolsInstance.data;
         componentLogsEntry = componentInfoToComponentLogsMap.get(componentInfo);
@@ -1078,7 +1089,7 @@ export function attach(
   function getComponentStack(
     topFrame: Error,
   ): null | {enableOwnerStacks: boolean, componentStack: string} {
-    if (getCurrentFiber === undefined) {
+    if (getCurrentFiber == null) {
       // Expected this to be part of the renderer. Ignore.
       return null;
     }
@@ -1130,7 +1141,7 @@ export function attach(
     type: 'error' | 'warn',
     args: $ReadOnlyArray<any>,
   ): void {
-    if (getCurrentFiber === undefined) {
+    if (getCurrentFiber == null) {
       // Expected this to be part of the renderer. Ignore.
       return;
     }
@@ -1197,16 +1208,6 @@ export function attach(
     // handlePostCommitFiberRoot again to ensure that we flush the changes after passive.
     needsToFlushComponentLogs = true;
   }
-
-  // Patching the console enables DevTools to do a few useful things:
-  // * Append component stacks to warnings and error messages
-  // * Disable logging during re-renders to inspect hooks (see inspectHooksOfFiber)
-  registerRendererWithConsole(onErrorOrWarning, getComponentStack);
-
-  // The renderer interface can't read these preferences directly,
-  // because it is stored in localStorage within the context of the extension.
-  // It relies on the extension to pass the preference through via the global.
-  patchConsoleUsingWindowValues();
 
   function debug(
     name: string,
@@ -1350,7 +1351,7 @@ export function attach(
     // Unfortunately this feature is not expected to work for React Native for now.
     // It would be annoying for us to spam YellowBox warnings with unactionable stuff,
     // so for now just skip this message...
-    //console.warn('⚛️ DevTools: Could not locate saved component filters');
+    //console.warn('⚛ DevTools: Could not locate saved component filters');
 
     // Fallback to assuming the default filters in this case.
     applyComponentFilters(getDefaultComponentFilters());
@@ -4264,7 +4265,10 @@ export function attach(
       source = getSourceForFiberInstance(fiberInstance);
     }
 
-    const componentLogsEntry = fiberToComponentLogsMap.get(fiber);
+    let componentLogsEntry = fiberToComponentLogsMap.get(fiber);
+    if (componentLogsEntry === undefined && fiber.alternate !== null) {
+      componentLogsEntry = fiberToComponentLogsMap.get(fiber.alternate);
+    }
 
     return {
       id: fiberInstance.id,
@@ -4344,8 +4348,7 @@ export function attach(
     const componentInfo = virtualInstance.data;
     const key =
       typeof componentInfo.key === 'string' ? componentInfo.key : null;
-    const props = null; // TODO: Track props on ReactComponentInfo;
-
+    const props = componentInfo.props == null ? null : componentInfo.props;
     const owners: null | Array<SerializedElement> =
       getOwnersListFromInstance(virtualInstance);
 
@@ -5208,13 +5211,10 @@ export function attach(
   }
 
   // Automatically start profiling so that we don't miss timing info from initial "mount".
-  if (
-    sessionStorageGetItem(SESSION_STORAGE_RELOAD_AND_PROFILE_KEY) === 'true'
-  ) {
-    startProfiling(
-      sessionStorageGetItem(SESSION_STORAGE_RECORD_CHANGE_DESCRIPTIONS_KEY) ===
-        'true',
-    );
+  if (reloadAndProfileConfig.shouldReloadAndProfile) {
+    const shouldRecordChangeDescriptions =
+      reloadAndProfileConfig.recordChangeDescriptions;
+    startProfiling(shouldRecordChangeDescriptions);
   }
 
   function getNearestFiber(devtoolsInstance: DevToolsInstance): null | Fiber {
@@ -5788,9 +5788,10 @@ export function attach(
     hasElementWithId,
     inspectElement,
     logElementToConsole,
-    patchConsoleForStrictMode,
+    getComponentStack,
     getElementAttributeByPath,
     getElementSourceFunctionById,
+    onErrorOrWarning,
     overrideError,
     overrideSuspense,
     overrideValueAtPath,
@@ -5801,7 +5802,6 @@ export function attach(
     startProfiling,
     stopProfiling,
     storeAsGlobal,
-    unpatchConsoleForStrictMode,
     updateComponentFilters,
     getEnvironmentNames,
   };

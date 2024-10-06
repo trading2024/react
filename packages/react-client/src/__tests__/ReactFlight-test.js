@@ -24,6 +24,10 @@ function normalizeCodeLocInfo(str) {
   return (
     str &&
     str.replace(/^ +(?:at|in) ([\S]+)[^\n]*/gm, function (m, name) {
+      const dot = name.lastIndexOf('.');
+      if (dot !== -1) {
+        name = name.slice(dot + 1);
+      }
       return '    in ' + name + (/\d/.test(m) ? ' (at **)' : '');
     })
   );
@@ -304,6 +308,10 @@ describe('ReactFlight', () => {
                 stack: gate(flag => flag.enableOwnerStacks)
                   ? '    in Object.<anonymous> (at **)'
                   : undefined,
+                props: {
+                  firstName: 'Seb',
+                  lastName: 'Smith',
+                },
               },
             ]
           : undefined,
@@ -343,6 +351,10 @@ describe('ReactFlight', () => {
                 stack: gate(flag => flag.enableOwnerStacks)
                   ? '    in Object.<anonymous> (at **)'
                   : undefined,
+                props: {
+                  firstName: 'Seb',
+                  lastName: 'Smith',
+                },
               },
             ]
           : undefined,
@@ -647,6 +659,46 @@ describe('ReactFlight', () => {
         multiple: 1,2
         content: [["hi","world"],["multiple","1"],["multiple","2"]]
       `);
+  });
+
+  it('can transport Error objects as values', async () => {
+    function ComponentClient({prop}) {
+      return `
+        is error: ${prop instanceof Error}
+        message: ${prop.message}
+        stack: ${normalizeCodeLocInfo(prop.stack).split('\n').slice(0, 2).join('\n')}
+        environmentName: ${prop.environmentName}
+      `;
+    }
+    const Component = clientReference(ComponentClient);
+
+    function ServerComponent() {
+      const error = new Error('hello');
+      return <Component prop={error} />;
+    }
+
+    const transport = ReactNoopFlightServer.render(<ServerComponent />);
+
+    await act(async () => {
+      ReactNoop.render(await ReactNoopFlightClient.read(transport));
+    });
+
+    if (__DEV__) {
+      expect(ReactNoop).toMatchRenderedOutput(`
+        is error: true
+        message: hello
+        stack: Error: hello
+    in ServerComponent (at **)
+        environmentName: Server
+      `);
+    } else {
+      expect(ReactNoop).toMatchRenderedOutput(`
+        is error: true
+        message: An error occurred in the Server Components render. The specific message is omitted in production builds to avoid leaking sensitive details. A digest property is included on this error instance which may provide additional details about the nature of the error.
+        stack: Error: An error occurred in the Server Components render. The specific message is omitted in production builds to avoid leaking sensitive details. A digest property is included on this error instance which may provide additional details about the nature of the error.
+        environmentName: undefined
+      `);
+    }
   });
 
   it('can transport cyclic objects', async () => {
@@ -2621,6 +2673,9 @@ describe('ReactFlight', () => {
                 stack: gate(flag => flag.enableOwnerStacks)
                   ? '    in Object.<anonymous> (at **)'
                   : undefined,
+                props: {
+                  transport: expect.arrayContaining([]),
+                },
               },
             ]
           : undefined,
@@ -2639,6 +2694,7 @@ describe('ReactFlight', () => {
                 stack: gate(flag => flag.enableOwnerStacks)
                   ? '    in Object.<anonymous> (at **)'
                   : undefined,
+                props: {},
               },
             ]
           : undefined,
@@ -2654,6 +2710,7 @@ describe('ReactFlight', () => {
                 stack: gate(flag => flag.enableOwnerStacks)
                   ? '    in myLazy (at **)\n    in lazyInitializer (at **)'
                   : undefined,
+                props: {},
               },
             ]
           : undefined,
@@ -2669,6 +2726,7 @@ describe('ReactFlight', () => {
                 stack: gate(flag => flag.enableOwnerStacks)
                   ? '    in Object.<anonymous> (at **)'
                   : undefined,
+                props: {},
               },
             ]
           : undefined,
@@ -2743,6 +2801,9 @@ describe('ReactFlight', () => {
                 stack: gate(flag => flag.enableOwnerStacks)
                   ? '    in Object.<anonymous> (at **)'
                   : undefined,
+                props: {
+                  transport: expect.arrayContaining([]),
+                },
               },
             ]
           : undefined,
@@ -2760,6 +2821,9 @@ describe('ReactFlight', () => {
                 stack: gate(flag => flag.enableOwnerStacks)
                   ? '    in ServerComponent (at **)'
                   : undefined,
+                props: {
+                  children: {},
+                },
               },
             ]
           : undefined,
@@ -2776,6 +2840,7 @@ describe('ReactFlight', () => {
                 stack: gate(flag => flag.enableOwnerStacks)
                   ? '    in Object.<anonymous> (at **)'
                   : undefined,
+                props: {},
               },
             ]
           : undefined,
@@ -2934,6 +2999,7 @@ describe('ReactFlight', () => {
                 stack: gate(flag => flag.enableOwnerStacks)
                   ? '    in Object.<anonymous> (at **)'
                   : undefined,
+                props: {},
               },
               {
                 env: 'B',
@@ -3064,6 +3130,9 @@ describe('ReactFlight', () => {
           stack: gate(flag => flag.enableOwnerStacks)
             ? '    in Object.<anonymous> (at **)'
             : undefined,
+          props: {
+            firstName: 'Seb',
+          },
         };
         expect(getDebugInfo(greeting)).toEqual([
           greetInfo,
@@ -3075,6 +3144,14 @@ describe('ReactFlight', () => {
             stack: gate(flag => flag.enableOwnerStacks)
               ? '    in Greeting (at **)'
               : undefined,
+            props: {
+              children: expect.objectContaining({
+                type: 'span',
+                props: {
+                  children: ['Hello, ', 'Seb'],
+                },
+              }),
+            },
           },
         ]);
         // The owner that created the span was the outer server component.
@@ -3121,6 +3198,69 @@ describe('ReactFlight', () => {
 
     expect(normalizeCodeLocInfo(stack)).toBe(
       '\n    in Bar (at **)' + '\n    in Foo (at **)',
+    );
+  });
+
+  // @gate __DEV__ && enableOwnerStacks
+  it('can track owner for a flight response created in another render', async () => {
+    jest.resetModules();
+    jest.mock('react', () => ReactServer);
+    // For this to work the Flight Client needs to be the react-server version.
+    const ReactNoopFlightClienOnTheServer = require('react-noop-renderer/flight-client');
+    jest.resetModules();
+    jest.mock('react', () => React);
+
+    let stack;
+
+    function Component() {
+      stack = ReactServer.captureOwnerStack();
+      return ReactServer.createElement('span', null, 'hi');
+    }
+
+    const ClientComponent = clientReference(Component);
+
+    function ThirdPartyComponent() {
+      return ReactServer.createElement(ClientComponent);
+    }
+
+    // This is rendered outside the render to ensure we don't inherit anything accidental
+    // by being in the same environment which would make it seem like it works when it doesn't.
+    const thirdPartyTransport = ReactNoopFlightServer.render(
+      {children: ReactServer.createElement(ThirdPartyComponent)},
+      {
+        environmentName: 'third-party',
+      },
+    );
+
+    async function fetchThirdParty() {
+      return ReactNoopFlightClienOnTheServer.read(thirdPartyTransport);
+    }
+
+    async function FirstPartyComponent() {
+      // This component fetches from a third party
+      const thirdParty = await fetchThirdParty();
+      return thirdParty.children;
+    }
+    function App() {
+      return ReactServer.createElement(FirstPartyComponent);
+    }
+
+    const transport = ReactNoopFlightServer.render(
+      ReactServer.createElement(App),
+    );
+
+    await act(async () => {
+      const root = await ReactNoopFlightClient.read(transport);
+      ReactNoop.render(root);
+    });
+
+    expect(normalizeCodeLocInfo(stack)).toBe(
+      '\n    in ThirdPartyComponent (at **)' +
+        '\n    in createResponse (at **)' + // These two internal frames should
+        '\n    in read (at **)' + // ideally not be included.
+        '\n    in fetchThirdParty (at **)' +
+        '\n    in FirstPartyComponent (at **)' +
+        '\n    in App (at **)',
     );
   });
 
